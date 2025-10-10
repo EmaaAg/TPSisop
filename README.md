@@ -1,6 +1,6 @@
 # Ejercicio 01
-g++ -std=gnu++17 app.cpp  -o app
-./app 2 20 datos.csv
+<p>g++ -std=gnu++17 app.cpp  -o app</p>
+<p>./app 2 20 datos.csv</p>
 
 # Ejercicio 02 
 <h2> Server </h2> 
