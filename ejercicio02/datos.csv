@@ -1,0 +1,21 @@
+ID,Nombre,Edad,Ciudad,Fuente
+1,Ana,26,Buenos Aires,Gen1_changed
+11,Luis,78,Salta,Gen2
+3,Ana,21,Salta,Gen1
+12,Agus,63,Mar del Plata,Gen2
+4,Tomas,53,Buenos Aires,Gen1
+13,Lauti,26,Mar del Plata,Gen2
+5,Agus,23,Salta,Gen1
+14,Cesar,66,Mendoza,Gen2
+6,Mica,72,Mar del Plata,Gen1
+15,Mica,32,Mendoza,Gen2
+7,Lucas,49,Mar del Plata,Gen1
+16,Cesar,42,Mar del Plata,Gen2
+8,Sofia,76,Mendoza,Gen1
+17,Sofia,28,La Plata,Gen2
+9,Agus,57,Mendoza,Gen1
+18,Agus,20,Salta,Gen2
+10,Sofia,69,La Plata,Gen1
+19,Tomas,43,Salta,Gen2
+20,Tomas,40,Cordoba,Gen2
+5,Pedro,35,Mendoza,Gen3
