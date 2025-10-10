@@ -1,7 +1,7 @@
 // server.cpp
 // Ejercicio 2 - Cliente-Servidor de Micro Base de Datos con Transacciones
 // Compilar: g++ -std=gnu++17 server.cpp -o server
-// Ejecutar: ./server <puerto> <ruta_csv> <N_clientes_concurrentes_referencia>
+// Ejecutar: ./server <puerto> <ruta_csv> <N_clientes_concurrentes>
 
 #include <iostream>
 #include <fstream>
@@ -23,6 +23,10 @@
 
 // --- Global CSV file path ---
 static std::string g_csv_path;
+
+// --- Global counter for active child processes ---
+static int active_child_processes = 0;
+static int max_allowed_children = 0; // Will be set from argv[3]
 
 // --- Helper Functions for CSV operations ---
 
@@ -115,7 +119,6 @@ void handle_client(int client_sock_fd, pid_t client_handler_pid) {
                 if (errno == EWOULDBLOCK) {
                     response = "ERROR: Another transaction is active. Please reattempt later.\n";
                 } else {
-                    // CORRECCIÓN: Convertir std::string a const char*
                     perror(("[Handler PID " + std::to_string(getpid()) + "] flock LOCK_EX (BEGIN_TRANSACTION)").c_str());
                     response = "ERROR: Could not acquire file lock: " + std::string(strerror(errno)) + "\n";
                 }
@@ -258,30 +261,41 @@ void handle_client(int client_sock_fd, pid_t client_handler_pid) {
 }
 
 
-// Signal handler for SIGCHLD to reap zombie processes
+// Signal handler for SIGCHLD to reap zombie processes and decrement counter
 void sigchld_handler(int sig) {
-    // waitpid with WNOHANG prevents blocking if no child has exited
+    int status;
+    pid_t pid;
+    // WNOHANG makes waitpid non-blocking, so it doesn't wait if no child has exited
     // Loop to reap all exited children, not just one
-    while (waitpid(-1, NULL, WNOHANG) > 0);
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        active_child_processes--; // Decrement the global counter
+        std::cout << "[Parent PID " << getpid() << "] Child PID " << pid << " exited. Active children: " << active_child_processes << std::endl;
+    }
 }
 
 
 int main(int argc, char* argv[]) {
     if (argc != 4) {
-        std::cerr << "Uso: " << argv[0] << " <puerto> <ruta_csv> <N_clientes_concurrentes_referencia>\n";
-        std::cerr << "   <N_clientes_concurrentes_referencia> es una referencia para el listen backlog.\n";
+        std::cerr << "Uso: " << argv[0] << " <puerto> <ruta_csv> <N_clientes_concurrentes>\n";
+        std::cerr << "   <N_clientes_concurrentes> es el número máximo de clientes que el servidor manejará a la vez.\n";
         return 1;
     }
 
     int port = std::stoi(argv[1]);
     g_csv_path = argv[2];
-    int max_concurrent_clients_ref = std::stoi(argv[3]); // Used as backlog size for listen
+    max_allowed_children = std::stoi(argv[3]);
 
-    // Set up SIGCHLD handler to prevent zombie processes
+    // --- LÍNEAS DE DEPURACIÓN AÑADIDAS ---
+    std::cout << "[DEBUG] Server (PID " << getpid() << ") started." << std::endl;
+    std::cout << "[DEBUG] Initial active_child_processes: " << active_child_processes << std::endl;
+    std::cout << "[DEBUG] Max allowed children (from argv): " << max_allowed_children << std::endl;
+    // ------------------------------------
+
+    // Set up SIGCHLD handler to prevent zombie processes and update counter
     struct sigaction sa;
     sa.sa_handler = sigchld_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART; // SA_RESTART makes system calls restart if interrupted by handler
+    sa.sa_flags = SA_RESTART;
     if (sigaction(SIGCHLD, &sa, NULL) == -1) {
         perror("sigaction for SIGCHLD");
         return 1;
@@ -316,25 +330,31 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Listen for incoming connections (max_concurrent_clients_ref + 5 for backlog)
-    if (listen(server_fd, max_concurrent_clients_ref + 5) < 0) {
+    // The listen backlog can be a bit larger than max_allowed_children
+    // to allow some clients to queue up while the server is busy with max active clients.
+    if (listen(server_fd, max_allowed_children + 5) < 0) {
         perror("listen");
         close(server_fd);
         return 1;
     }
 
     std::cout << "Server listening on port " << port << " for CSV file: " << g_csv_path << std::endl;
-    std::cout << "Configured listen backlog (approx. max waiting clients): " << max_concurrent_clients_ref << std::endl;
+    std::cout << "Maximum concurrent clients allowed: " << max_allowed_children << std::endl;
     std::cout << "Waiting for client connections...\n";
 
     while (true) {
+        // Esperar si se ha alcanzado el límite de clientes concurrentes
+        while (active_child_processes >= max_allowed_children) {
+            std::cout << "[Parent PID " << getpid() << "] Max concurrent clients reached (" << max_allowed_children << "). Waiting for a slot...\n";
+            usleep(100000); // Pequeña pausa de 100ms para evitar busy-waiting
+        }
+
+        // Aceptar una nueva conexión
         if ((new_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen)) < 0) {
-            // Check for EINTR (interrupted by signal), then continue
-            if (errno == EINTR) {
+            if (errno == EINTR) { // accept() fue interrumpido por una señal (e.g. SIGCHLD)
                 continue;
             }
             perror("accept");
-            // If a critical error on accept, consider breaking or more robust error handling
             continue;
         }
 
@@ -345,19 +365,17 @@ int main(int argc, char* argv[]) {
             perror("fork failed");
             std::string err_msg = "ERROR: Server could not fork a new process to handle client.\n";
             send(new_socket, err_msg.c_str(), err_msg.length(), 0);
-            close(new_socket); // Close the new socket on parent on fork failure
-        } else if (pid == 0) { // Child process
-            close(server_fd); // Child closes listening socket
-            handle_client(new_socket, getpid()); // getpid() is the child's PID
-            // _exit(0) is called within handle_client
-        } else { // Parent process
-            close(new_socket); // Parent closes the new client socket (child handles it)
-            // No explicit counter management for `N_clientes_concurrentes` in parent,
-            // as `fork` just creates a new process, and `SIGCHLD` reaps them.
-            // The `listen` backlog controls the waiting queue before `accept`.
+            close(new_socket);
+        } else if (pid == 0) { // Proceso hijo
+            close(server_fd);
+            handle_client(new_socket, getpid());
+        } else { // Proceso padre
+            close(new_socket);
+            active_child_processes++;
+            std::cout << "[Parent PID " << getpid() << "] Forked child PID " << pid << ". Active children: " << active_child_processes << std::endl;
         }
     }
 
-    close(server_fd); // Should technically be unreachable in this infinite loop
+    close(server_fd);
     return 0;
 }
